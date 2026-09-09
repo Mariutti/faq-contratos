@@ -1,69 +1,153 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import type { Mensagem } from "@/lib/tipos";
+
+// Na tela, cada mensagem do assistente pode vir acompanhada das
+// fontes usadas para gerar aquela resposta específica.
+type MensagemExibida = Mensagem & { fontes?: string[] };
 
 export default function Home() {
+  const [mensagens, setMensagens] = useState<MensagemExibida[]>([]);
+  const [pergunta, setPergunta] = useState("");
+  const [carregando, setCarregando] = useState(false);
+  const fimDaListaRef = useRef<HTMLDivElement>(null);
+
+  // Rola a conversa para o final sempre que uma mensagem nova aparece.
+  useEffect(() => {
+    fimDaListaRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [mensagens]);
+
+  async function enviarPergunta() {
+    const texto = pergunta.trim();
+    if (!texto || carregando) return;
+
+    const novasMensagens: MensagemExibida[] = [...mensagens, { papel: "user", texto }];
+    setMensagens(novasMensagens);
+    setPergunta("");
+    setCarregando(true);
+
+    const res = await fetch("/api/perguntar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Manda a conversa inteira, para a IA considerar o contexto
+      // das perguntas anteriores (sem os "fontes", que é só de exibição).
+      body: JSON.stringify({
+        mensagens: novasMensagens.map(({ papel, texto }) => ({ papel, texto })),
+      }),
+    });
+
+    const dados = await res.json();
+
+    setMensagens((atual) => [
+      ...atual,
+      {
+        papel: "model",
+        texto: dados.resposta ?? dados.erro ?? "Ocorreu um erro inesperado.",
+        fontes: dados.fontes,
+      },
+    ]);
+    setCarregando(false);
+  }
+
+  function novaConversa() {
+    setMensagens([]);
+    setPergunta("");
+  }
+
+  function aoPressionarTecla(evento: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter envia, Shift+Enter quebra linha (padrão de chat)
+    if (evento.key === "Enter" && !evento.shiftKey) {
+      evento.preventDefault();
+      enviarPergunta();
+    }
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <main
+      style={{
+        maxWidth: 700,
+        margin: "0 auto",
+        padding: "0 20px",
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <header
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "20px 0",
+          borderBottom: "1px solid #ddd",
+        }}
+      >
+        <div>
+          <h1 style={{ fontSize: 18, margin: 0 }}>Portal de Dúvidas em Contratações Públicas</h1>
+          <p style={{ fontSize: 13, color: "#666", margin: "4px 0 0" }}>
+            Baseado na Lei nº 14.133/2021 e materiais complementares
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+        <button onClick={novaConversa} style={{ padding: "8px 14px", whiteSpace: "nowrap" }}>
+          + Nova conversa
+        </button>
+      </header>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "16px 0" }}>
+        {mensagens.length === 0 && (
+          <p style={{ color: "#888" }}>
+            Digite sua pergunta sobre contratações públicas para começar a conversa.
+          </p>
+        )}
+
+        {mensagens.map((mensagem, indice) => (
+          <div
+            key={indice}
+            style={{
+              display: "flex",
+              justifyContent: mensagem.papel === "user" ? "flex-end" : "flex-start",
+              marginBottom: 12,
+            }}
           >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+            <div
+              style={{
+                maxWidth: "80%",
+                padding: "10px 14px",
+                borderRadius: 12,
+                background: mensagem.papel === "user" ? "#0a58ca" : "#f1f1f1",
+                color: mensagem.papel === "user" ? "#fff" : "#111",
+              }}
+            >
+              <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{mensagem.texto}</p>
+
+              {mensagem.fontes && mensagem.fontes.length > 0 && (
+                <p style={{ margin: "8px 0 0", fontSize: 12, opacity: 0.7 }}>
+                  Fontes: {mensagem.fontes.join(", ")}
+                </p>
+              )}
+            </div>
+          </div>
+        ))}
+
+        {carregando && <p style={{ color: "#888" }}>Consultando...</p>}
+
+        <div ref={fimDaListaRef} />
+      </div>
+
+      <div style={{ display: "flex", gap: 8, padding: "12px 0 20px", borderTop: "1px solid #ddd" }}>
+        <textarea
+          value={pergunta}
+          onChange={(evento) => setPergunta(evento.target.value)}
+          onKeyDown={aoPressionarTecla}
+          rows={2}
+          style={{ flex: 1, padding: 10, fontSize: 16, resize: "none" }}
+          placeholder="Ex.: quando é obrigatória a matriz de riscos?"
+        />
+        <button onClick={enviarPergunta} disabled={carregando} style={{ padding: "0 18px" }}>
+          Enviar
+        </button>
+      </div>
+    </main>
   );
 }
