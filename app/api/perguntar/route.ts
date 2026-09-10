@@ -1,57 +1,63 @@
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
 import { gerarEmbeddingDaPergunta, gerarResposta } from "@/lib/gemini";
-import type { Mensagem } from "@/lib/tipos";
+import { identificarCliente, rateLimit } from "@/lib/rate-limit";
+import { supabase } from "@/lib/supabase";
+import { validarMensagens } from "@/lib/validacao";
 
-const LIMITE_CARACTERES_PERGUNTA = 300;
-const LIMITE_MENSAGENS_HISTORICO = 20; // evita o histórico crescer sem limite
+const LIMITE_BYTES_CORPO = 20_000;
+const LIMITE_MENSAGENS_HISTORICO = 20;
 const QUANTIDADE_TRECHOS_RECUPERADOS = 5;
+const LIMIAR_SIMILARIDADE = 0.55;
+
+type TrechoEncontrado = {
+  conteudo: string;
+  fonte: string;
+  similaridade: number;
+};
 
 export async function POST(request: Request) {
-  const body = await request.json();
-  const mensagens: Mensagem[] = body.mensagens;
-
-  if (!Array.isArray(mensagens) || mensagens.length === 0) {
-    return NextResponse.json({ erro: "Envie ao menos uma mensagem." }, { status: 400 });
-  }
-
-  const ultimaMensagem = mensagens[mensagens.length - 1];
-
-  if (ultimaMensagem?.papel !== "user" || typeof ultimaMensagem.texto !== "string") {
+  const limite = await rateLimit.limit(identificarCliente(request));
+  if (!limite.success) {
     return NextResponse.json(
-      { erro: "A última mensagem precisa ser do usuário." },
-      { status: 400 }
+      { erro: "Muitas consultas em pouco tempo. Tente novamente em instantes." },
+      {
+        status: 429,
+        headers: { "Retry-After": String(Math.max(1, Math.ceil((limite.reset - Date.now()) / 1000))) },
+      }
     );
   }
 
-  if (ultimaMensagem.texto.length > LIMITE_CARACTERES_PERGUNTA) {
-    return NextResponse.json(
-      { erro: `Pergunta muito longa (máximo de ${LIMITE_CARACTERES_PERGUNTA} caracteres).` },
-      { status: 400 }
-    );
+  let body: unknown;
+  try {
+    const corpoBruto = await request.text();
+    if (new TextEncoder().encode(corpoBruto).byteLength > LIMITE_BYTES_CORPO) {
+      return NextResponse.json({ erro: "Requisição muito grande." }, { status: 413 });
+    }
+    body = JSON.parse(corpoBruto);
+  } catch {
+    return NextResponse.json({ erro: "JSON inválido." }, { status: 400 });
   }
 
-  // Só mandamos para a IA as últimas N mensagens, para o histórico
-  // (e o custo/tamanho de cada chamada) não crescer sem limite numa
-  // conversa muito longa.
-  const historicoRecente = mensagens.slice(-LIMITE_MENSAGENS_HISTORICO);
+  const validacao = validarMensagens(
+    typeof body === "object" && body !== null && "mensagens" in body ? body.mensagens : undefined
+  );
+  if (!validacao.ok) {
+    return NextResponse.json({ erro: validacao.erro }, { status: 400 });
+  }
+
+  const historicoRecente = validacao.mensagens.slice(-LIMITE_MENSAGENS_HISTORICO);
+  const perguntasDeUsuario = historicoRecente.filter((m) => m.papel === "user");
+  const textoParaBusca = perguntasDeUsuario.slice(-2).map((m) => m.texto).join("\n");
 
   try {
-    // Para a BUSCA no banco, combinamos a última pergunta do usuário
-    // com a pergunta anterior dele (se houver) -- dá um pouco de
-    // contexto para perguntas de continuação, sem precisar de uma
-    // chamada extra só para "reescrever" a pergunta.
-    const perguntasDeUsuario = historicoRecente.filter((m) => m.papel === "user");
-    const textoParaBusca = perguntasDeUsuario
-      .slice(-2)
-      .map((m) => m.texto)
-      .join("\n");
-
     const embeddingDaBusca = await gerarEmbeddingDaPergunta(textoParaBusca);
-
     const { data: trechosEncontrados, error: erroBusca } = await supabase.rpc(
       "buscar_documentos",
-      { query_embedding: embeddingDaBusca, limite: QUANTIDADE_TRECHOS_RECUPERADOS }
+      {
+        query_embedding: embeddingDaBusca,
+        limite: QUANTIDADE_TRECHOS_RECUPERADOS,
+        limiar_similaridade: LIMIAR_SIMILARIDADE,
+      }
     );
 
     if (erroBusca) {
@@ -62,25 +68,21 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!trechosEncontrados || trechosEncontrados.length === 0) {
+    const trechos = (trechosEncontrados ?? []) as TrechoEncontrado[];
+    if (trechos.length === 0) {
       return NextResponse.json({
-        resposta: "Não encontrei nada relacionado a essa pergunta na base disponível.",
+        resposta: "Não encontrei evidência suficiente para responder a essa pergunta na base disponível.",
         fontes: [],
       });
     }
 
-    // Manda a CONVERSA INTEIRA (para continuidade) + os trechos
-    // recuperados AGORA (para fundamentar a resposta mais recente).
-    const textoResposta = await gerarResposta(
+    const resposta = await gerarResposta(
       historicoRecente,
-      trechosEncontrados.map((t: { conteudo: string }) => t.conteudo)
+      trechos.map((trecho) => trecho.conteudo)
     );
+    const fontes = Array.from(new Set(trechos.map((trecho) => trecho.fonte)));
 
-    const fontes = Array.from(
-      new Set(trechosEncontrados.map((t: { fonte: string }) => t.fonte))
-    );
-
-    return NextResponse.json({ resposta: textoResposta, fontes });
+    return NextResponse.json({ resposta, fontes });
   } catch (erro) {
     console.error("Erro ao processar pergunta:", erro);
     return NextResponse.json(
